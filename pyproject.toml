@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aider-aid"
+version = "0.1.0"
+description = "A small aider configurator, launcher, and doctor with Ollama-first workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "aider-aid contributors" }]
+dependencies = [
+  "PyYAML>=6.0",
+  "typer>=0.12,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+aider-aid = "aider_aid.cli:app"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
