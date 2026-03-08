@@ -10,8 +10,11 @@
 ## Install from release (Alpha 1.0)
 
 ```bash
-# Download the v1.0.0-alpha1 source archive from this repo's Releases page
-tar -xzf aider-aid-1.0.0-alpha1.tar.gz
+# Download from:
+# https://github.com/darsrc/aider-aid/releases/tag/v1.0.0-alpha1
+curl -L -o aider-aid-v1.0.0-alpha1.tar.gz \
+  https://github.com/darsrc/aider-aid/archive/refs/tags/v1.0.0-alpha1.tar.gz
+tar -xzf aider-aid-v1.0.0-alpha1.tar.gz
 cd aider-aid-1.0.0-alpha1
 python -m venv .venv
 source .venv/bin/activate
@@ -21,7 +24,7 @@ python -m pip install .
 ## Install from source
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/darsrc/aider-aid.git
 cd aider-aid
 python -m venv .venv
 source .venv/bin/activate
