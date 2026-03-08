@@ -10,15 +10,14 @@
 ## Install from release (Alpha 1.0)
 
 ```bash
-# Download from:
+# 1) Download wheel from:
 # https://github.com/darsrc/aider-aid/releases/tag/v1.0.0-alpha1
-curl -L -o aider-aid-v1.0.0-alpha1.tar.gz \
-  https://github.com/darsrc/aider-aid/archive/refs/tags/v1.0.0-alpha1.tar.gz
-tar -xzf aider-aid-v1.0.0-alpha1.tar.gz
-cd aider-aid-1.0.0-alpha1
+curl -L -o aider_aid-0.1.0-py3-none-any.whl \
+  https://github.com/darsrc/aider-aid/releases/download/v1.0.0-alpha1/aider_aid-0.1.0-py3-none-any.whl
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install .
+python -m pip install ./aider_aid-0.1.0-py3-none-any.whl
+aider-aid --help
 ```
 
 ## Install from source
@@ -29,6 +28,7 @@ cd aider-aid
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
+aider-aid --help
 ```
 
 ## Quick start
