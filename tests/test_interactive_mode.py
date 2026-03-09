@@ -268,6 +268,8 @@ def test_launch_sanitizes_legacy_profile_metadata(monkeypatch, tmp_path):
                 "name": "gpu-all",
                 "aider-aid-ollama-server": "gpu-a",
                 "model": "ollama_chat/llama3",
+                "show-model-warnings": False,
+                "check-model-accepts-settings": False,
                 "set-env": ["OLLAMA_API_BASE=http://10.0.0.64:11436"],
             },
             sort_keys=False,
@@ -303,6 +305,8 @@ def test_launch_sanitizes_legacy_profile_metadata(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert "name" not in captured["config"]
     assert "aider-aid-ollama-server" not in captured["config"]
+    assert "show-model-warnings" not in captured["config"]
+    assert "check-model-accepts-settings" not in captured["config"]
 
 
 def test_launch_maps_legacy_server_binding_to_ollama_api_base(monkeypatch, tmp_path):
@@ -399,7 +403,7 @@ def test_launch_interactive_gate_yes_parses_extra_args(monkeypatch, tmp_path):
     monkeypatch.setattr("aider_aid.cli.ask_confirm", lambda label, default=False: True)
     monkeypatch.setattr(
         "aider_aid.cli._prompt_text",
-        lambda label, default=None, allow_empty=False: "--no-show-model-warnings --yes-always",
+        lambda label, default=None, allow_empty=False: "--yes-always --message hi",
     )
 
     captured: dict[str, object] = {}
@@ -415,7 +419,7 @@ def test_launch_interactive_gate_yes_parses_extra_args(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0
-    assert captured["extra_args"] == ["--no-show-model-warnings", "--yes-always"]
+    assert captured["extra_args"] == ["--yes-always", "--message", "hi"]
 
 
 def test_launch_interactive_cancel_at_extra_args_prompt_aborts(monkeypatch, tmp_path):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,9 +29,28 @@ from aider_aid.project_store import Project, ProjectStore
 
 DEFAULT_MODEL_CONTEXT_SIZE = 8192
 MODEL_SETTINGS_SUFFIX = ".aider.model.settings.yml"
+MODEL_METADATA_SUFFIX = ".aider.model.metadata.json"
 QOL_PRESETS = ("local-safe", "fast-iter", "strict-ci", "large-repo")
 MODEL_ROLE_WEAK = "weak-model"
 MODEL_ROLE_EDITOR = "editor-model"
+MODEL_ROLE_KEYS = ("model", MODEL_ROLE_WEAK, MODEL_ROLE_EDITOR)
+
+KNOWN_PROVIDER_PREFIXES = (
+    "openai/",
+    "anthropic/",
+    "deepseek/",
+    "google/",
+    "gemini/",
+    "groq/",
+    "xai/",
+    "openrouter/",
+    "cohere/",
+    "mistral/",
+    "vertex_ai/",
+    "bedrock/",
+    "azure/",
+)
+DEPRECATED_WARNING_KEYS = ("show-model-warnings", "check-model-accepts-settings")
 
 
 @dataclass(frozen=True)
@@ -123,11 +143,23 @@ def _managed_model_settings_path(store: ProfileStore, profile_name: str) -> Path
     return store.profiles_dir / f"{slug}{MODEL_SETTINGS_SUFFIX}"
 
 
+def _managed_model_metadata_path(store: ProfileStore, profile_name: str) -> Path:
+    slug = slugify_profile_name(profile_name)
+    return store.profiles_dir / f"{slug}{MODEL_METADATA_SUFFIX}"
+
+
 def _is_managed_model_settings_path(store: ProfileStore, path_value: str | None) -> bool:
     if not isinstance(path_value, str) or not path_value.strip():
         return False
     candidate = Path(path_value).expanduser()
     return candidate.parent == store.profiles_dir and candidate.name.endswith(MODEL_SETTINGS_SUFFIX)
+
+
+def _is_managed_model_metadata_path(store: ProfileStore, path_value: str | None) -> bool:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return False
+    candidate = Path(path_value).expanduser()
+    return candidate.parent == store.profiles_dir and candidate.name.endswith(MODEL_METADATA_SUFFIX)
 
 
 def _stage_model_settings_write(path: Path, context_size: int) -> tuple[bool, str | None]:
@@ -137,7 +169,32 @@ def _stage_model_settings_write(path: Path, context_size: int) -> tuple[bool, st
     return existed, previous
 
 
+def _write_model_metadata(path: Path, payload: dict[str, dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _stage_model_metadata_write(
+    path: Path,
+    payload: dict[str, dict[str, Any]],
+) -> tuple[bool, str | None]:
+    existed = path.exists()
+    previous = path.read_text(encoding="utf-8") if existed else None
+    _write_model_metadata(path, payload)
+    return existed, previous
+
+
 def _rollback_staged_model_settings(path: Path, existed: bool, previous: str | None) -> None:
+    if existed and previous is not None:
+        path.write_text(previous, encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _rollback_staged_model_metadata(path: Path, existed: bool, previous: str | None) -> None:
     if existed and previous is not None:
         path.write_text(previous, encoding="utf-8")
     else:
@@ -149,6 +206,52 @@ def _has_model_settings_file(config: dict[str, Any]) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _has_model_metadata_file(config: dict[str, Any]) -> bool:
+    value = config.get("model-metadata-file")
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _model_needs_generated_metadata(model: str) -> bool:
+    value = model.strip()
+    if not value:
+        return False
+    if value.startswith(("ollama_chat/", "ollama/", "hf.co/")):
+        return True
+    if ":" in value and "/" in value and not value.startswith(KNOWN_PROVIDER_PREFIXES):
+        return True
+    return False
+
+
+def _build_model_metadata_payload(
+    config: dict[str, Any],
+    *,
+    context_size: int,
+) -> dict[str, dict[str, Any]]:
+    payload: dict[str, dict[str, Any]] = {}
+    for role_key in MODEL_ROLE_KEYS:
+        value = config.get(role_key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        model_name = value.strip()
+        if not _model_needs_generated_metadata(model_name):
+            continue
+        payload[model_name] = {
+            "max_tokens": context_size,
+            "max_input_tokens": context_size,
+            "max_output_tokens": min(4096, context_size),
+            "input_cost_per_token": 0.0,
+            "output_cost_per_token": 0.0,
+            "litellm_provider": "ollama_chat",
+            "mode": "chat",
+        }
+    return payload
+
+
+def _remove_deprecated_warning_keys(config: dict[str, Any]) -> None:
+    for key in DEPRECATED_WARNING_KEYS:
+        config.pop(key, None)
+
+
 def _create_runtime_model_settings(context_size: int) -> Path:
     with tempfile.NamedTemporaryFile(
         "w",
@@ -158,6 +261,22 @@ def _create_runtime_model_settings(context_size: int) -> Path:
         encoding="utf-8",
     ) as tmp:
         yaml.safe_dump(_build_context_model_settings(context_size), tmp, sort_keys=False, allow_unicode=False)
+        return Path(tmp.name)
+
+
+def _create_runtime_model_metadata(config: dict[str, Any], *, context_size: int) -> Path | None:
+    payload = _build_model_metadata_payload(config, context_size=context_size)
+    if not payload:
+        return None
+    with tempfile.NamedTemporaryFile(
+        "w",
+        suffix=MODEL_METADATA_SUFFIX,
+        prefix="aider-aid-runtime-",
+        delete=False,
+        encoding="utf-8",
+    ) as tmp:
+        json.dump(payload, tmp, indent=2, sort_keys=True)
+        tmp.write("\n")
         return Path(tmp.name)
 
 
@@ -324,22 +443,35 @@ def create_profile(
         config_data.update(_build_qol_preset(qol_preset))
     for key, value in _parse_option_assignments(option or []).items():
         config_data[key] = value
+    _remove_deprecated_warning_keys(config_data)
     config_data["model"] = model_value
     config_data[MODEL_ROLE_WEAK] = weak_model_value
     config_data[MODEL_ROLE_EDITOR] = editor_model_value
 
     staged_model_settings: tuple[Path, bool, str | None] | None = None
+    staged_model_metadata: tuple[Path, bool, str | None] | None = None
     if parsed_context_size is not None and not _has_model_settings_file(config_data):
         model_settings_path = _managed_model_settings_path(store, profile_name)
         existed, previous = _stage_model_settings_write(model_settings_path, parsed_context_size)
         staged_model_settings = (model_settings_path, existed, previous)
         config_data["model-settings-file"] = str(model_settings_path)
+    if not _has_model_metadata_file(config_data):
+        metadata_context = read_config_context_size(config_data) or parsed_context_size or DEFAULT_MODEL_CONTEXT_SIZE
+        model_metadata_payload = _build_model_metadata_payload(config_data, context_size=metadata_context)
+        if model_metadata_payload:
+            model_metadata_path = _managed_model_metadata_path(store, profile_name)
+            existed, previous = _stage_model_metadata_write(model_metadata_path, model_metadata_payload)
+            staged_model_metadata = (model_metadata_path, existed, previous)
+            config_data["model-metadata-file"] = str(model_metadata_path)
     if env_entries:
         config_data["set-env"] = env_entries
 
     try:
         profile, validation = store.save_profile(profile_name, config_data)
     except (ProfileValidationError, ProfileError):
+        if staged_model_metadata:
+            path, existed, previous = staged_model_metadata
+            _rollback_staged_model_metadata(path, existed, previous)
         if staged_model_settings:
             path, existed, previous = staged_model_settings
             _rollback_staged_model_settings(path, existed, previous)
@@ -416,13 +548,22 @@ def edit_profile(
     set_set_env_entries(data, env_entries)
     for key, value in _parse_option_assignments(option or []).items():
         data[key] = value
+    _remove_deprecated_warning_keys(data)
 
     staged_model_settings: list[tuple[Path, bool, str | None]] = []
     cleanup_managed_model_settings: list[Path] = []
+    staged_model_metadata: list[tuple[Path, bool, str | None]] = []
+    cleanup_managed_model_metadata: list[Path] = []
     old_model_settings_value = profile.config.get("model-settings-file")
     old_managed_path = (
         Path(old_model_settings_value).expanduser()
         if _is_managed_model_settings_path(store, old_model_settings_value)
+        else None
+    )
+    old_model_metadata_value = profile.config.get("model-metadata-file")
+    old_managed_metadata_path = (
+        Path(old_model_metadata_value).expanduser()
+        if _is_managed_model_metadata_path(store, old_model_metadata_value)
         else None
     )
 
@@ -444,13 +585,31 @@ def edit_profile(
             data["model-settings-file"] = str(migrated)
             cleanup_managed_model_settings.append(old_managed_path)
 
+    metadata_context = read_config_context_size(data) or parsed_context_size or DEFAULT_MODEL_CONTEXT_SIZE
+    model_metadata_payload = _build_model_metadata_payload(data, context_size=metadata_context)
+    if model_metadata_payload:
+        model_metadata_path = _managed_model_metadata_path(store, target_name)
+        existed, previous = _stage_model_metadata_write(model_metadata_path, model_metadata_payload)
+        staged_model_metadata.append((model_metadata_path, existed, previous))
+        data["model-metadata-file"] = str(model_metadata_path)
+        if old_managed_metadata_path and old_managed_metadata_path != model_metadata_path:
+            cleanup_managed_model_metadata.append(old_managed_metadata_path)
+    else:
+        data.pop("model-metadata-file", None)
+        if old_managed_metadata_path:
+            cleanup_managed_model_metadata.append(old_managed_metadata_path)
+
     try:
         updated, validation = store.save_profile(target_name, data, previous_path=profile.path)
     except ProfileError:
+        for path, existed, previous in reversed(staged_model_metadata):
+            _rollback_staged_model_metadata(path, existed, previous)
         for path, existed, previous in reversed(staged_model_settings):
             _rollback_staged_model_settings(path, existed, previous)
         raise
 
+    for stale_path in cleanup_managed_model_metadata:
+        stale_path.unlink(missing_ok=True)
     for stale_path in cleanup_managed_model_settings:
         stale_path.unlink(missing_ok=True)
 
@@ -464,6 +623,9 @@ def remove_profile(name: str) -> Path:
     settings_value = profile.config.get("model-settings-file")
     if _is_managed_model_settings_path(store, settings_value):
         Path(settings_value).expanduser().unlink(missing_ok=True)
+    metadata_value = profile.config.get("model-metadata-file")
+    if _is_managed_model_metadata_path(store, metadata_value):
+        Path(metadata_value).expanduser().unlink(missing_ok=True)
     return removed
 
 
@@ -516,8 +678,11 @@ def launch_for_identifiers(
     cleanup_runtime_profile = False
     runtime_model_settings_path: Path | None = None
     cleanup_runtime_model_settings = False
+    runtime_model_metadata_path: Path | None = None
+    cleanup_runtime_model_metadata = False
 
     sanitized_config = strip_aider_aid_metadata(selected_profile.config)
+    _remove_deprecated_warning_keys(sanitized_config)
     legacy_server_name = selected_profile.config.get(AIDER_AID_OLLAMA_SERVER_KEY)
     if isinstance(legacy_server_name, str) and legacy_server_name.strip():
         server = s_store.get_server(legacy_server_name.strip())
@@ -531,6 +696,15 @@ def launch_for_identifiers(
         runtime_model_settings_path = _create_runtime_model_settings(DEFAULT_MODEL_CONTEXT_SIZE)
         sanitized_config["model-settings-file"] = str(runtime_model_settings_path)
         cleanup_runtime_model_settings = True
+    if not _has_model_metadata_file(sanitized_config):
+        metadata_context = read_config_context_size(sanitized_config) or DEFAULT_MODEL_CONTEXT_SIZE
+        runtime_model_metadata_path = _create_runtime_model_metadata(
+            sanitized_config,
+            context_size=metadata_context,
+        )
+        if runtime_model_metadata_path:
+            sanitized_config["model-metadata-file"] = str(runtime_model_metadata_path)
+            cleanup_runtime_model_metadata = True
 
     if sanitized_config != selected_profile.config:
         with tempfile.NamedTemporaryFile(
@@ -556,6 +730,8 @@ def launch_for_identifiers(
             runtime_profile_path.unlink(missing_ok=True)
         if cleanup_runtime_model_settings and runtime_model_settings_path:
             runtime_model_settings_path.unlink(missing_ok=True)
+        if cleanup_runtime_model_metadata and runtime_model_metadata_path:
+            runtime_model_metadata_path.unlink(missing_ok=True)
 
     return LaunchResult(
         command=cmd,

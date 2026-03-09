@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aider-aid"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small aider configurator, launcher, and doctor with Ollama-first workflows."
 readme = "README.md"
 requires-python = ">=3.11"

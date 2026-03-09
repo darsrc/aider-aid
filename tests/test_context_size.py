@@ -236,6 +236,54 @@ def test_config_edit_preserves_explicit_role_models_and_allows_clear(monkeypatch
     assert "editor-model" not in profile.config
 
 
+def test_config_create_generates_model_metadata_for_unknown_models(monkeypatch, tmp_path: Path):
+    runner = CliRunner()
+    store = _store_without_aider_validation(tmp_path)
+    monkeypatch.setattr("aider_aid.cli._profile_store", lambda: store)
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "create",
+            "dev",
+            "--model",
+            "hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K",
+            "--weak-model",
+            "MFDoom/deepseek-r1-tool-calling:14b",
+            "--context-size",
+            "12288",
+        ],
+    )
+
+    assert result.exit_code == 0
+    profile = store.get_profile("dev")
+    metadata_path = Path(profile.config["model-metadata-file"])
+    assert metadata_path.exists()
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K"]["max_input_tokens"] == 12288
+    assert payload["MFDoom/deepseek-r1-tool-calling:14b"]["input_cost_per_token"] == 0.0
+
+
+def test_config_edit_updates_model_metadata(monkeypatch, tmp_path: Path):
+    runner = CliRunner()
+    store = _store_without_aider_validation(tmp_path)
+    monkeypatch.setattr("aider_aid.cli._profile_store", lambda: store)
+    created = runner.invoke(app, ["config", "create", "dev", "--model", "llama3"])
+    assert created.exit_code == 0
+
+    updated = runner.invoke(
+        app,
+        ["config", "edit", "dev", "--weak-model", "MFDoom/deepseek-r1-tool-calling:14b", "--context-size", "16384"],
+    )
+    assert updated.exit_code == 0
+    profile = store.get_profile("dev")
+    metadata_path = Path(profile.config["model-metadata-file"])
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["ollama_chat/llama3"]["max_input_tokens"] == 16384
+    assert payload["MFDoom/deepseek-r1-tool-calling:14b"]["max_output_tokens"] == 4096
+
+
 def test_config_remove_deletes_managed_model_settings(monkeypatch, tmp_path: Path):
     runner = CliRunner()
     store = _store_without_aider_validation(tmp_path)
@@ -244,8 +292,11 @@ def test_config_remove_deletes_managed_model_settings(monkeypatch, tmp_path: Pat
     assert created.exit_code == 0
 
     model_settings_path = tmp_path / "configs" / "dev.aider.model.settings.yml"
+    model_metadata_path = tmp_path / "configs" / "dev.aider.model.metadata.json"
     assert model_settings_path.exists()
+    assert model_metadata_path.exists()
 
     removed = runner.invoke(app, ["config", "remove", "dev", "--yes"])
     assert removed.exit_code == 0
     assert not model_settings_path.exists()
+    assert not model_metadata_path.exists()

@@ -204,6 +204,10 @@ class TextPromptDialog(ModalScreen[str | None]):
       margin-top: 1;
       height: auto;
     }
+    #dialog-hint {
+      margin-top: 1;
+      color: #8fb7d1;
+    }
     """
 
     def __init__(
@@ -312,6 +316,7 @@ class ChoiceDialog(ModalScreen[str | None]):
             yield Static(self._title, id="dialog-title")
             yield Static(self._label, id="dialog-label")
             yield Select(self._options, prompt="Choose option", allow_blank=False, id="dialog-select")
+            yield Static("Keyboard: Up/Down move, Enter selects, Esc cancels.", id="dialog-hint")
             with Horizontal(id="dialog-buttons"):
                 yield Button("Select", id="dialog-save", variant="success")
                 yield Button("Cancel", id="dialog-cancel", variant="default")
@@ -557,6 +562,16 @@ class AiderAidTextualApp(App[None]):
         self._sidebar_focus_index = 0
         self._action_focus_index = 0
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        _ = parameters
+        if not self._modal_open():
+            return True
+        if action in {"focus_next", "focus_prev"}:
+            return True
+        if action in {"toggle_help", "escape_context"}:
+            return isinstance(self.screen, HelpDialog)
+        return False
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="shell"):
@@ -788,19 +803,14 @@ class AiderAidTextualApp(App[None]):
         self._focus_actions()
 
     def action_focus_next(self) -> None:
-        if self._modal_open():
-            return
-        if self._focus_region == "sidebar":
-            buttons = self._nav_buttons()
-            if buttons:
-                self._sidebar_focus_index = (self._sidebar_focus_index + 1) % len(buttons)
-        else:
-            buttons = self._visible_action_buttons()
-            if buttons:
-                self._action_focus_index = (self._action_focus_index + 1) % len(buttons)
-        self._focus_current_region()
+        focused = self.screen.focus_next()
+        self._sync_focus_state_from_widget(focused)
 
     def action_focus_prev(self) -> None:
+        focused = self.screen.focus_previous()
+        self._sync_focus_state_from_widget(focused)
+
+    def _cycle_region_prev(self) -> None:
         if self._modal_open():
             return
         if self._focus_region == "sidebar":
@@ -813,11 +823,38 @@ class AiderAidTextualApp(App[None]):
                 self._action_focus_index = (self._action_focus_index - 1) % len(buttons)
         self._focus_current_region()
 
+    def _cycle_region_next(self) -> None:
+        if self._modal_open():
+            return
+        if self._focus_region == "sidebar":
+            buttons = self._nav_buttons()
+            if buttons:
+                self._sidebar_focus_index = (self._sidebar_focus_index + 1) % len(buttons)
+        else:
+            buttons = self._visible_action_buttons()
+            if buttons:
+                self._action_focus_index = (self._action_focus_index + 1) % len(buttons)
+        self._focus_current_region()
+
+    def _sync_focus_state_from_widget(self, focused: object | None) -> None:
+        if not isinstance(focused, Button):
+            return
+        widget_id = focused.id or ""
+        if widget_id in NAV_BUTTON_IDS:
+            self._focus_region = "sidebar"
+            self._sidebar_focus_index = NAV_BUTTON_IDS.index(widget_id)
+            return
+        if widget_id.startswith("action-"):
+            raw_idx = widget_id.replace("action-", "", 1)
+            if raw_idx.isdigit():
+                self._focus_region = "actions"
+                self._action_focus_index = int(raw_idx)
+
     def action_move_up(self) -> None:
-        self.action_focus_prev()
+        self._cycle_region_prev()
 
     def action_move_down(self) -> None:
-        self.action_focus_next()
+        self._cycle_region_next()
 
     def action_focus_first(self) -> None:
         if self._modal_open():
@@ -1644,12 +1681,6 @@ class AiderAidTextualApp(App[None]):
             except ValueError as exc:
                 self._set_status(f"Invalid one-off extra args: {exc}")
                 return
-
-        if not dry_run:
-            dry_run = await self._ask_confirm(
-                title="Launch",
-                message="Run as dry-run only?\nChoose Confirm for dry-run, Cancel for real launch.",
-            )
 
         summary = [
             f"Project: {project_name}",
