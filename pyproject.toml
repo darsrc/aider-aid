@@ -11,6 +11,8 @@ requires-python = ">=3.11"
 authors = [{ name = "aider-aid contributors" }]
 dependencies = [
   "PyYAML>=6.0",
+  "questionary>=2.0,<3.0",
+  "textual>=0.66,<1.0",
   "typer>=0.12,<1.0",
 ]
 

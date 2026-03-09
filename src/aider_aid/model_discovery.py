@@ -45,26 +45,9 @@ def parse_ollama_list_output(output: str) -> list[str]:
     return models
 
 
-def parse_aider_list_models_output(output: str) -> list[str]:
-    models: list[str] = []
-    for raw_line in output.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("- "):
-            continue
-        value = line[2:].strip()
-        if not value:
-            continue
-        try:
-            models.append(normalize_ollama_model(value))
-        except ValueError:
-            continue
-    return models
-
-
 @dataclass(frozen=True)
 class ModelDiscovery:
     installed_models: list[str] = field(default_factory=list)
-    aider_known_models: list[str] = field(default_factory=list)
     combined_models: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -87,7 +70,6 @@ def discover_ollama_models(
 ) -> ModelDiscovery:
     warnings: list[str] = []
     installed: list[str] = []
-    aider_known: list[str] = []
 
     if command_exists_fn("ollama"):
         result = run(["ollama", "list"])
@@ -99,20 +81,9 @@ def discover_ollama_models(
     else:
         warnings.append("Ollama CLI not found in PATH.")
 
-    if command_exists_fn("aider"):
-        result = run(["aider", "--list-models", "ollama"])
-        if result.returncode == 0:
-            aider_known = parse_aider_list_models_output(result.stdout)
-        else:
-            err = (result.stderr or result.stdout).strip()
-            warnings.append(f"Unable to list aider-known Ollama models: {err}")
-    else:
-        warnings.append("aider binary not found in PATH.")
-
-    combined = _dedupe_keep_order(installed + aider_known)
+    combined = _dedupe_keep_order(installed)
     return ModelDiscovery(
         installed_models=installed,
-        aider_known_models=aider_known,
         combined_models=combined,
         warnings=warnings,
     )

@@ -38,6 +38,16 @@ class Profile:
     config: dict[str, Any]
 
 
+AIDER_AID_METADATA_KEYS = {"name", "aider-aid-ollama-server"}
+
+
+def strip_aider_aid_metadata(config: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(config)
+    for key in AIDER_AID_METADATA_KEYS:
+        sanitized.pop(key, None)
+    return sanitized
+
+
 def slugify_profile_name(name: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.strip().lower()).strip("-")
     if not slug:
@@ -100,11 +110,15 @@ def delete_env_var(entries: list[str], key: str) -> list[str]:
     return serialize_set_env(env_map)
 
 
-def canonicalize_profile_model(config: dict[str, Any]) -> None:
-    model = config.get("model")
-    if not isinstance(model, str) or not model.strip():
-        return
-    config["model"] = normalize_ollama_model(model)
+MODEL_ROLE_KEYS = ("model", "weak-model", "editor-model")
+
+
+def canonicalize_profile_models(config: dict[str, Any]) -> None:
+    for key in MODEL_ROLE_KEYS:
+        model = config.get(key)
+        if not isinstance(model, str) or not model.strip():
+            continue
+        config[key] = normalize_ollama_model(model)
 
 
 class ProfileStore:
@@ -146,7 +160,7 @@ class ProfileStore:
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
             slug = profile_path_to_slug(path)
-            name = slug.replace("-", " ").title()
+            name = slug
         return Profile(name=name, path=path, config=data)
 
     def list_profiles(self) -> list[Profile]:
@@ -189,7 +203,7 @@ class ProfileStore:
                 message="Skipped validation because aider is not installed.",
             )
 
-        result = self._run(["aider", "--config", str(profile_path), "--version"])
+        result = self._run(["aider", "--config", str(profile_path), "--list-models", "ollama"])
         if result.returncode == 0:
             return ValidationResult(ok=True, skipped=False, message="")
 
@@ -204,9 +218,8 @@ class ProfileStore:
         previous_path: Path | None = None,
     ) -> tuple[Profile, ValidationResult]:
         self.ensure_dirs()
-        data = dict(config)
-        data["name"] = name
-        canonicalize_profile_model(data)
+        data = strip_aider_aid_metadata(config)
+        canonicalize_profile_models(data)
 
         target_path = self._get_profile_path(name)
         temp_path = target_path.with_suffix(target_path.suffix + ".tmp")

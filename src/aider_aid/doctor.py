@@ -5,13 +5,14 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Mapping
 
+import yaml
+
 from aider_aid.model_discovery import normalize_ollama_model, strip_ollama_prefix
-from aider_aid.ollama_server_store import (
-    AIDER_AID_OLLAMA_SERVER_KEY,
-    OllamaServerStore,
-)
+from aider_aid.ollama_server_store import OllamaServerStore
+from aider_aid.paths import PROFILE_SUFFIX
 from aider_aid.profile_store import Profile, ProfileStore, get_set_env_entries, parse_set_env
 from aider_aid.shell import CommandResult, command_exists, run_command
 
@@ -29,9 +30,15 @@ class DoctorResult:
     remediation: str = ""
 
 
-def probe_ollama_endpoint(endpoint: str, timeout: float = 2.0) -> tuple[bool, list[str], str]:
+def probe_ollama_endpoint(
+    endpoint: str,
+    timeout: float = 2.0,
+    api_key: str | None = None,
+) -> tuple[bool, list[str], str]:
     url = endpoint.rstrip("/") + "/api/tags"
     request = urllib.request.Request(url, method="GET")
+    if api_key:
+        request.add_header("Authorization", f"Bearer {api_key}")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8")
@@ -58,7 +65,6 @@ def probe_ollama_endpoint(endpoint: str, timeout: float = 2.0) -> tuple[bool, li
 def _collect_ollama_profile_data(
     profiles: list[Profile],
     env: Mapping[str, str],
-    server_urls: Mapping[str, str],
 ) -> tuple[set[str], set[str], list[DoctorResult]]:
     endpoints: set[str] = set()
     configured_models: set[str] = set()
@@ -66,60 +72,127 @@ def _collect_ollama_profile_data(
 
     env_default_endpoint = env.get("OLLAMA_API_BASE", DEFAULT_OLLAMA_API_BASE)
     for profile in profiles:
-        model = profile.config.get("model")
-        if not isinstance(model, str) or not model.strip():
-            continue
+        has_ollama_role_model = False
+        for role_key in ("model", "weak-model", "editor-model"):
+            model = profile.config.get(role_key)
+            if not isinstance(model, str) or not model.strip():
+                continue
 
-        if model.startswith("ollama/"):
-            warnings.append(
-                DoctorResult(
-                    id="profile.model.prefix",
-                    status="warn",
-                    message=(
-                        f'Profile "{profile.name}" uses "{model}". '
-                        "Use ollama_chat/ for better aider compatibility."
-                    ),
-                    remediation=(
-                        "Run `aider-aid config edit` and migrate the model to "
-                        f'"{normalize_ollama_model(model)}".'
-                    ),
-                )
-            )
-
-        try:
-            normalized = normalize_ollama_model(model)
-        except ValueError:
-            continue
-        if not normalized.startswith("ollama_chat/"):
-            continue
-        configured_models.add(strip_ollama_prefix(normalized))
-
-        profile_env = parse_set_env(get_set_env_entries(profile.config))
-        server_name = profile.config.get(AIDER_AID_OLLAMA_SERVER_KEY)
-        endpoint = env_default_endpoint
-        if isinstance(server_name, str) and server_name.strip():
-            endpoint = server_urls.get(server_name.strip(), "")
-            if not endpoint:
+            if model.startswith("ollama/"):
                 warnings.append(
                     DoctorResult(
-                        id="ollama.server.binding",
-                        status="fail",
+                        id="profile.model.prefix",
+                        status="warn",
                         message=(
-                            f'Profile "{profile.name}" references unknown Ollama server '
-                            f'"{server_name}".'
+                            f'Profile "{profile.name}" {role_key} uses "{model}". '
+                            "Use ollama_chat/ for better aider compatibility."
                         ),
-                        remediation="Add the server via `aider-aid server add` or edit the profile.",
+                        remediation=(
+                            "Run `aider-aid config edit` and migrate the model to "
+                            f'"{normalize_ollama_model(model)}".'
+                        ),
                     )
                 )
+
+            try:
+                normalized = normalize_ollama_model(model)
+            except ValueError:
                 continue
-        elif "OLLAMA_API_BASE" in profile_env:
-            endpoint = profile_env["OLLAMA_API_BASE"]
-        endpoints.add(endpoint)
+            if not normalized.startswith("ollama_chat/"):
+                continue
+            has_ollama_role_model = True
+            configured_models.add(strip_ollama_prefix(normalized))
+
+        if has_ollama_role_model:
+            profile_env = parse_set_env(get_set_env_entries(profile.config))
+            endpoint = profile_env.get("OLLAMA_API_BASE", env_default_endpoint)
+            endpoints.add(endpoint)
 
     if configured_models and not endpoints:
         endpoints.add(env_default_endpoint)
 
     return endpoints, configured_models, warnings
+
+
+def _check_profile_files_valid(profile_store: ProfileStore) -> DoctorResult:
+    paths = sorted(profile_store.profiles_dir.glob(f"*{PROFILE_SUFFIX}"))
+    if not paths:
+        return DoctorResult(
+            id="config.files.valid",
+            status="pass",
+            message="No profile files found.",
+        )
+
+    invalid: list[str] = []
+    for path in paths:
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError) as exc:
+            invalid.append(f"{path}: {exc}")
+            continue
+        if data is not None and not isinstance(data, dict):
+            invalid.append(f"{path}: profile file must be a YAML mapping.")
+
+    if invalid:
+        return DoctorResult(
+            id="config.files.valid",
+            status="fail",
+            message=f"{len(invalid)} invalid profile file(s) found.",
+            details="\n".join(invalid),
+            remediation="Fix or remove invalid profile files under ~/.config/aider-aid/configs/.",
+        )
+    return DoctorResult(
+        id="config.files.valid",
+        status="pass",
+        message=f"Validated {len(paths)} profile file(s).",
+    )
+
+
+def _check_model_settings_files_exist(profiles: list[Profile]) -> DoctorResult:
+    missing: list[str] = []
+    for profile in profiles:
+        model_settings_file = profile.config.get("model-settings-file")
+        if not isinstance(model_settings_file, str) or not model_settings_file.strip():
+            continue
+        candidate = Path(model_settings_file).expanduser()
+        if not candidate.exists():
+            missing.append(f'{profile.name}: {candidate}')
+
+    if missing:
+        return DoctorResult(
+            id="config.model_settings_file.exists",
+            status="fail",
+            message=f"{len(missing)} profile(s) reference missing model-settings files.",
+            details="\n".join(missing),
+            remediation=(
+                "Run `aider-aid config edit <name> --context-size 8192` to regenerate managed settings files "
+                "or update/remove model-settings-file in the profile."
+            ),
+        )
+    return DoctorResult(
+        id="config.model_settings_file.exists",
+        status="pass",
+        message="All referenced model-settings files exist.",
+    )
+
+
+def _check_textual_available() -> DoctorResult:
+    try:
+        import textual
+    except Exception as exc:
+        return DoctorResult(
+            id="ui.textual.available",
+            status="warn",
+            message="Textual is not available; polished dashboard UI will fall back to classic mode.",
+            details=str(exc),
+            remediation="Install/upgrade with: python -m pip install --upgrade textual aider-aid",
+        )
+    version = getattr(textual, "__version__", "unknown")
+    return DoctorResult(
+        id="ui.textual.available",
+        status="pass",
+        message=f"Textual available (version {version}).",
+    )
 
 
 def run_doctor(
@@ -131,6 +204,7 @@ def run_doctor(
     env: Mapping[str, str] | None = None,
     probe_endpoint: Callable[[str], tuple[bool, list[str], str]] = probe_ollama_endpoint,
 ) -> list[DoctorResult]:
+    _ = server_store
     env_map: Mapping[str, str] = env if env is not None else os.environ
     results: list[DoctorResult] = []
 
@@ -205,16 +279,14 @@ def run_doctor(
             )
         )
 
-    profiles = profile_store.list_profiles()
-    server_urls: dict[str, str] = {}
-    if server_store is not None:
-        for server in server_store.list_servers():
-            server_urls[server.name] = server.url
+    results.append(_check_profile_files_valid(profile_store))
+    results.append(_check_textual_available())
 
+    profiles = profile_store.list_profiles()
+    results.append(_check_model_settings_files_exist(profiles))
     endpoints, configured_models, prefix_warnings = _collect_ollama_profile_data(
         profiles,
         env_map,
-        server_urls,
     )
     results.extend(prefix_warnings)
 

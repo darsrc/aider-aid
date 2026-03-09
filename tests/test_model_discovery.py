@@ -1,8 +1,9 @@
 from aider_aid.model_discovery import (
+    discover_ollama_models,
     normalize_ollama_model,
-    parse_aider_list_models_output,
     parse_ollama_list_output,
 )
+from aider_aid.shell import CommandResult
 
 
 def test_normalize_ollama_model():
@@ -20,12 +21,21 @@ qwen2.5-coder   efgh    8 GB   now
     assert parse_ollama_list_output(output) == ["llama3:8b", "qwen2.5-coder"]
 
 
-def test_parse_aider_list_models_output():
-    output = """Models which match "ollama":
-- ollama/llama3
-- ollama/llama3.1
-"""
-    assert parse_aider_list_models_output(output) == [
-        "ollama_chat/llama3",
-        "ollama_chat/llama3.1",
-    ]
+def test_discover_ollama_models_uses_ollama_only():
+    def runner(cmd, **kwargs):  # noqa: ANN001
+        if cmd == ["ollama", "list"]:
+            return CommandResult(
+                cmd=list(cmd),
+                returncode=0,
+                stdout="NAME ID SIZE MODIFIED\nllama3 abc 4GB now\n",
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    discovered = discover_ollama_models(
+        run=runner,
+        command_exists_fn=lambda name: name == "ollama",
+    )
+    assert discovered.installed_models == ["ollama_chat/llama3"]
+    assert discovered.combined_models == ["ollama_chat/llama3"]
+    assert discovered.warnings == []

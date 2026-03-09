@@ -23,10 +23,18 @@ def test_save_profile_and_preserve_unknown_keys(tmp_path: Path):
 
     profile, validation = store.save_profile(
         "My Profile",
-        {"model": "ollama/llama3", "foo": "bar", "set-env": ["A=1"]},
+        {
+            "model": "ollama/llama3",
+            "weak-model": "ollama/qwen2.5-coder:7b",
+            "editor-model": "openai/gpt-4o-mini",
+            "foo": "bar",
+            "set-env": ["A=1"],
+        },
     )
     assert profile.config["foo"] == "bar"
     assert profile.config["model"] == "ollama_chat/llama3"
+    assert profile.config["weak-model"] == "ollama_chat/qwen2.5-coder:7b"
+    assert profile.config["editor-model"] == "openai/gpt-4o-mini"
     assert validation.ok
 
     data = dict(profile.config)
