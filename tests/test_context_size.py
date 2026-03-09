@@ -61,6 +61,18 @@ def test_config_create_accepts_custom_context_size(monkeypatch, tmp_path: Path):
     assert _read_num_ctx(model_settings_path) == 16384
 
 
+def test_config_create_can_enable_ollama_only(monkeypatch, tmp_path: Path):
+    runner = CliRunner()
+    store = _store_without_aider_validation(tmp_path)
+    monkeypatch.setattr("aider_aid.cli._profile_store", lambda: store)
+
+    result = runner.invoke(app, ["config", "create", "dev", "--model", "llama3", "--ollama-only"])
+
+    assert result.exit_code == 0
+    profile = store.get_profile("dev")
+    assert "AIDER_AID_OLLAMA_ONLY=1" in profile.config["set-env"]
+
+
 def test_config_edit_updates_context_size(monkeypatch, tmp_path: Path):
     runner = CliRunner()
     store = _store_without_aider_validation(tmp_path)
@@ -75,6 +87,57 @@ def test_config_edit_updates_context_size(monkeypatch, tmp_path: Path):
     profile = store.get_profile("dev")
     model_settings_path = Path(profile.config["model-settings-file"])
     assert _read_num_ctx(model_settings_path) == 24576
+
+
+def test_launch_blocks_non_ollama_override_when_ollama_only(monkeypatch, tmp_path: Path):
+    runner = CliRunner()
+    monkeypatch.setenv("AIDER_AID_CONFIG_HOME", str(tmp_path))
+
+    profiles_dir = tmp_path / "configs"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    profile_path = profiles_dir / "dev.aider.conf.yml"
+    profile_path.write_text(
+        yaml.safe_dump(
+            {"model": "ollama_chat/llama3", "set-env": ["AIDER_AID_OLLAMA_ONLY=1"]},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    projects_file = tmp_path / "projects.config"
+    projects_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "projects": [{"name": "repo", "path": str(project_dir)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_launch_aider(**kwargs):  # noqa: ANN003, ANN202
+        raise AssertionError("launch_aider should not run in ollama-only violation path")
+
+    monkeypatch.setattr("aider_aid.cli.launch_aider", fail_launch_aider)
+
+    result = runner.invoke(
+        app,
+        [
+            "launch",
+            "--project",
+            "repo",
+            "--profile",
+            "dev",
+            "--dry-run",
+            "--arg=--model",
+            "--arg=openai/gpt-4o-mini",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "AIDER_AID_OLLAMA_ONLY=1" in result.stdout
 
 
 def test_launch_injects_default_context_size_for_legacy_profile(monkeypatch, tmp_path: Path):
@@ -261,8 +324,8 @@ def test_config_create_generates_model_metadata_for_unknown_models(monkeypatch, 
     metadata_path = Path(profile.config["model-metadata-file"])
     assert metadata_path.exists()
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert payload["hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K"]["max_input_tokens"] == 12288
-    assert payload["MFDoom/deepseek-r1-tool-calling:14b"]["input_cost_per_token"] == 0.0
+    assert payload["ollama_chat/hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K"]["max_input_tokens"] == 12288
+    assert payload["ollama_chat/MFDoom/deepseek-r1-tool-calling:14b"]["input_cost_per_token"] == 0.0
 
 
 def test_config_edit_updates_model_metadata(monkeypatch, tmp_path: Path):
@@ -281,7 +344,7 @@ def test_config_edit_updates_model_metadata(monkeypatch, tmp_path: Path):
     metadata_path = Path(profile.config["model-metadata-file"])
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["ollama_chat/llama3"]["max_input_tokens"] == 16384
-    assert payload["MFDoom/deepseek-r1-tool-calling:14b"]["max_output_tokens"] == 4096
+    assert payload["ollama_chat/MFDoom/deepseek-r1-tool-calling:14b"]["max_output_tokens"] == 4096
 
 
 def test_config_remove_deletes_managed_model_settings(monkeypatch, tmp_path: Path):

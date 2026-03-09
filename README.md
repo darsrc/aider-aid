@@ -9,6 +9,7 @@
 - Profile management with model role support (`model`, `weak-model`, `editor-model`).
 - Managed context settings (`model-settings-file`) with default 8k context for parity.
 - Managed model metadata (`model-metadata-file`) for local/unknown models so aider receives explicit context/cost metadata.
+- Optional `--ollama-only` profile guard to block non-Ollama model overrides at launch.
 - Launch flow that works with both modern and legacy profiles (runtime sanitization and compatibility handling).
 
 ## Install from GitHub release

@@ -5,6 +5,29 @@ from typing import Callable
 
 from aider_aid.shell import CommandResult, command_exists, run_command
 
+KNOWN_PROVIDER_PREFIXES = (
+    "openai/",
+    "anthropic/",
+    "deepseek/",
+    "google/",
+    "gemini/",
+    "groq/",
+    "xai/",
+    "openrouter/",
+    "cohere/",
+    "mistral/",
+    "vertex_ai/",
+    "bedrock/",
+    "azure/",
+)
+
+
+def is_known_provider_model(model: str) -> bool:
+    value = model.strip()
+    if not value:
+        return False
+    return value.startswith(KNOWN_PROVIDER_PREFIXES)
+
 
 def normalize_ollama_model(model: str) -> str:
     value = model.strip()
@@ -15,9 +38,13 @@ def normalize_ollama_model(model: str) -> str:
         return value
     if value.startswith("ollama/"):
         return "ollama_chat/" + value.split("/", 1)[1]
+    if value.startswith("hf.co/"):
+        return "ollama_chat/" + value
     if "/" not in value:
         return "ollama_chat/" + value
-    return value
+    if is_known_provider_model(value):
+        return value
+    return "ollama_chat/" + value
 
 
 def strip_ollama_prefix(model: str) -> str:

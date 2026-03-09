@@ -27,6 +27,13 @@ def test_create_profile_with_context_and_endpoint(monkeypatch, tmp_path: Path):
     assert payload[0]["extra_params"]["num_ctx"] == 12288
 
 
+def test_create_profile_can_enable_ollama_only(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("AIDER_AID_CONFIG_HOME", str(tmp_path))
+    result = services.create_profile(name="dev", model="llama3", ollama_only=True)
+    profile = result.profile
+    assert "AIDER_AID_OLLAMA_ONLY=1" in profile.config["set-env"]
+
+
 def _read_model_metadata(model_metadata_path: Path) -> dict[str, dict[str, object]]:
     return json.loads(model_metadata_path.read_text(encoding="utf-8"))
 
@@ -43,10 +50,10 @@ def test_create_profile_generates_model_metadata_for_unknown_models(monkeypatch,
     metadata_path = Path(profile.config["model-metadata-file"])
     assert metadata_path.exists()
     payload = _read_model_metadata(metadata_path)
-    assert "hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K" in payload
-    assert "MFDoom/deepseek-r1-tool-calling:14b" in payload
-    assert payload["hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K"]["max_input_tokens"] == 12288
-    assert payload["MFDoom/deepseek-r1-tool-calling:14b"]["input_cost_per_token"] == 0.0
+    assert "ollama_chat/hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K" in payload
+    assert "ollama_chat/MFDoom/deepseek-r1-tool-calling:14b" in payload
+    assert payload["ollama_chat/hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K"]["max_input_tokens"] == 12288
+    assert payload["ollama_chat/MFDoom/deepseek-r1-tool-calling:14b"]["input_cost_per_token"] == 0.0
 
 
 def test_edit_profile_updates_model_and_context(monkeypatch, tmp_path: Path):
@@ -120,7 +127,7 @@ def test_edit_profile_updates_generated_model_metadata(monkeypatch, tmp_path: Pa
     metadata_path = Path(profile.config["model-metadata-file"])
     payload = _read_model_metadata(metadata_path)
     assert payload["ollama_chat/llama3"]["max_input_tokens"] == 16384
-    assert payload["MFDoom/deepseek-r1-tool-calling:14b"]["max_output_tokens"] == 4096
+    assert payload["ollama_chat/MFDoom/deepseek-r1-tool-calling:14b"]["max_output_tokens"] == 4096
 
 
 def test_remove_profile_deletes_managed_settings(monkeypatch, tmp_path: Path):
@@ -191,6 +198,7 @@ def test_launch_for_identifiers_injects_runtime_metadata_for_legacy_profile(monk
         config = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
         metadata_path = Path(config["model-metadata-file"])
         captured["project_path"] = project_path
+        captured["config"] = config
         captured["metadata_path"] = metadata_path
         captured["metadata_exists_during_launch"] = metadata_path.exists()
         captured["metadata_payload"] = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -205,9 +213,27 @@ def test_launch_for_identifiers_injects_runtime_metadata_for_legacy_profile(monk
     )
     assert result.returncode == 0
     assert captured["project_path"] == project_dir
+    assert captured["config"]["model"] == "ollama_chat/hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K"
+    assert captured["config"]["weak-model"] == "ollama_chat/MFDoom/deepseek-r1-tool-calling:14b"
     assert captured["metadata_exists_during_launch"] is True
-    assert "hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K" in captured["metadata_payload"]
+    assert "ollama_chat/hf.co/Melvin56/Phi-4-mini-instruct-abliterated-GGUF:Q6_K" in captured["metadata_payload"]
     assert Path(captured["metadata_path"]).exists() is False
+
+
+def test_launch_for_identifiers_blocks_non_ollama_override_when_ollama_only(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("AIDER_AID_CONFIG_HOME", str(tmp_path))
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    services.add_project(path=project_dir, name="repo")
+    services.create_profile(name="dev", model="llama3", ollama_only=True)
+
+    with pytest.raises(ValueError, match="AIDER_AID_OLLAMA_ONLY=1"):
+        services.launch_for_identifiers(
+            project_identifier="repo",
+            profile_name="dev",
+            extra_args=["--model", "openai/gpt-4o-mini"],
+            dry_run=True,
+        )
 
 
 def test_fetch_models_from_endpoint_requires_models(monkeypatch):

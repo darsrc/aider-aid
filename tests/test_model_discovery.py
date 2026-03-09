@@ -11,6 +11,10 @@ def test_normalize_ollama_model():
     assert normalize_ollama_model("ollama/llama3") == "ollama_chat/llama3"
     assert normalize_ollama_model("ollama_chat/llama3") == "ollama_chat/llama3"
     assert normalize_ollama_model("openai/gpt-4o") == "openai/gpt-4o"
+    assert normalize_ollama_model("hf.co/owner/model:Q4_K_M") == "ollama_chat/hf.co/owner/model:Q4_K_M"
+    assert normalize_ollama_model("huihui_ai/deepseek-r1-abliterated:14b-qwen-distill") == (
+        "ollama_chat/huihui_ai/deepseek-r1-abliterated:14b-qwen-distill"
+    )
 
 
 def test_parse_ollama_list_output():

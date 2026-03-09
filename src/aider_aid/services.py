@@ -10,7 +10,7 @@ import yaml
 
 from aider_aid.doctor import DEFAULT_OLLAMA_API_BASE, DoctorResult, probe_ollama_endpoint, run_doctor
 from aider_aid.launcher import format_shell_command, launch_aider
-from aider_aid.model_discovery import normalize_ollama_model
+from aider_aid.model_discovery import is_known_provider_model, normalize_ollama_model
 from aider_aid.ollama_server_store import AIDER_AID_OLLAMA_SERVER_KEY, OllamaServerStore
 from aider_aid.profile_store import (
     Profile,
@@ -18,6 +18,7 @@ from aider_aid.profile_store import (
     ProfileStore,
     ProfileValidationError,
     ValidationResult,
+    canonicalize_profile_models,
     delete_env_var,
     get_set_env_entries,
     set_set_env_entries,
@@ -34,22 +35,9 @@ QOL_PRESETS = ("local-safe", "fast-iter", "strict-ci", "large-repo")
 MODEL_ROLE_WEAK = "weak-model"
 MODEL_ROLE_EDITOR = "editor-model"
 MODEL_ROLE_KEYS = ("model", MODEL_ROLE_WEAK, MODEL_ROLE_EDITOR)
-
-KNOWN_PROVIDER_PREFIXES = (
-    "openai/",
-    "anthropic/",
-    "deepseek/",
-    "google/",
-    "gemini/",
-    "groq/",
-    "xai/",
-    "openrouter/",
-    "cohere/",
-    "mistral/",
-    "vertex_ai/",
-    "bedrock/",
-    "azure/",
-)
+OLLAMA_ONLY_ENV_KEY = "AIDER_AID_OLLAMA_ONLY"
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+MODEL_OVERRIDE_FLAGS = ("--model", "--weak-model", "--editor-model")
 DEPRECATED_WARNING_KEYS = ("show-model-warnings", "check-model-accepts-settings")
 
 
@@ -217,7 +205,7 @@ def _model_needs_generated_metadata(model: str) -> bool:
         return False
     if value.startswith(("ollama_chat/", "ollama/", "hf.co/")):
         return True
-    if ":" in value and "/" in value and not value.startswith(KNOWN_PROVIDER_PREFIXES):
+    if "/" in value and not is_known_provider_model(value):
         return True
     return False
 
@@ -356,6 +344,60 @@ def extract_env_var(config: dict[str, Any], key: str) -> str | None:
     return None
 
 
+def _is_truthy_flag(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in TRUTHY_ENV_VALUES
+
+
+def _collect_model_overrides(extra_args: list[str]) -> list[tuple[str, str]]:
+    overrides: list[tuple[str, str]] = []
+    idx = 0
+    while idx < len(extra_args):
+        arg = extra_args[idx].strip()
+        if "=" in arg:
+            flag, value = arg.split("=", 1)
+            value = value.strip()
+            if flag in MODEL_OVERRIDE_FLAGS and value:
+                overrides.append((flag, value))
+        elif arg in MODEL_OVERRIDE_FLAGS and idx + 1 < len(extra_args):
+            value = extra_args[idx + 1].strip()
+            if value:
+                overrides.append((arg, value))
+            idx += 1
+        idx += 1
+    return overrides
+
+
+def _enforce_ollama_only_policy(config: dict[str, Any], *, extra_args: list[str]) -> None:
+    if not _is_truthy_flag(extract_env_var(config, OLLAMA_ONLY_ENV_KEY)):
+        return
+
+    violations: list[str] = []
+    for role_key in MODEL_ROLE_KEYS:
+        value = config.get(role_key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized = _normalize_optional_model(value)
+        if normalized is None or not normalized.startswith("ollama_chat/"):
+            violations.append(f"{role_key}={value.strip()}")
+
+    for flag, value in _collect_model_overrides(extra_args):
+        try:
+            normalized = normalize_ollama_model(value)
+        except ValueError:
+            violations.append(f"{flag}={value}")
+            continue
+        if not normalized.startswith("ollama_chat/"):
+            violations.append(f"{flag}={value}")
+
+    if violations:
+        joined = ", ".join(violations)
+        raise ValueError(
+            f"Launch blocked because {OLLAMA_ONLY_ENV_KEY}=1 and non-Ollama model values were provided: {joined}"
+        )
+
+
 def read_config_context_size(config: dict[str, Any]) -> int | None:
     value = config.get("model-settings-file")
     if not isinstance(value, str) or not value.strip():
@@ -419,6 +461,7 @@ def create_profile(
     qol_preset: str | None = None,
     ollama_api_base: str | None = None,
     ollama_api_key: str | None = None,
+    ollama_only: bool = False,
     set_env: list[str] | None = None,
     option: list[str] | None = None,
 ) -> ProfileMutationResult:
@@ -437,6 +480,8 @@ def create_profile(
         env_entries = upsert_env_var(env_entries, "OLLAMA_API_BASE", ollama_api_base)
     if ollama_api_key:
         env_entries = upsert_env_var(env_entries, "OLLAMA_API_KEY", ollama_api_key)
+    if ollama_only:
+        env_entries = upsert_env_var(env_entries, OLLAMA_ONLY_ENV_KEY, "1")
 
     config_data: dict[str, Any] = {}
     if qol_preset:
@@ -494,6 +539,8 @@ def edit_profile(
     clear_ollama_api_base: bool = False,
     ollama_api_key: str | None = None,
     clear_ollama_api_key: bool = False,
+    ollama_only: bool = False,
+    clear_ollama_only: bool = False,
     set_env: list[str] | None = None,
     option: list[str] | None = None,
 ) -> ProfileMutationResult:
@@ -503,6 +550,8 @@ def edit_profile(
         raise ValueError("Use either weak_model or clear_weak_model, not both.")
     if editor_model and clear_editor_model:
         raise ValueError("Use either editor_model or clear_editor_model, not both.")
+    if ollama_only and clear_ollama_only:
+        raise ValueError("Use either ollama_only or clear_ollama_only, not both.")
 
     data = dict(profile.config)
     target_name = (new_name or profile.name).strip()
@@ -544,6 +593,10 @@ def edit_profile(
         env_entries = upsert_env_var(env_entries, "OLLAMA_API_KEY", ollama_api_key)
     if clear_ollama_api_key:
         env_entries = delete_env_var(env_entries, "OLLAMA_API_KEY")
+    if ollama_only:
+        env_entries = upsert_env_var(env_entries, OLLAMA_ONLY_ENV_KEY, "1")
+    if clear_ollama_only:
+        env_entries = delete_env_var(env_entries, OLLAMA_ONLY_ENV_KEY)
 
     set_set_env_entries(data, env_entries)
     for key, value in _parse_option_assignments(option or []).items():
@@ -683,6 +736,7 @@ def launch_for_identifiers(
 
     sanitized_config = strip_aider_aid_metadata(selected_profile.config)
     _remove_deprecated_warning_keys(sanitized_config)
+    canonicalize_profile_models(sanitized_config)
     legacy_server_name = selected_profile.config.get(AIDER_AID_OLLAMA_SERVER_KEY)
     if isinstance(legacy_server_name, str) and legacy_server_name.strip():
         server = s_store.get_server(legacy_server_name.strip())
@@ -705,6 +759,7 @@ def launch_for_identifiers(
         if runtime_model_metadata_path:
             sanitized_config["model-metadata-file"] = str(runtime_model_metadata_path)
             cleanup_runtime_model_metadata = True
+    _enforce_ollama_only_policy(sanitized_config, extra_args=final_args)
 
     if sanitized_config != selected_profile.config:
         with tempfile.NamedTemporaryFile(
