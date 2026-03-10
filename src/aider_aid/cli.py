@@ -11,7 +11,13 @@ from typing import Any, Literal
 import typer
 import yaml
 
-from aider_aid.doctor import DEFAULT_OLLAMA_API_BASE, DoctorResult, probe_ollama_endpoint, run_doctor
+from aider_aid.doctor import (
+    DEFAULT_OLLAMA_API_BASE,
+    DoctorResult,
+    fix_profile_model_prefixes,
+    probe_ollama_endpoint,
+    run_doctor,
+)
 from aider_aid.launcher import format_shell_command, launch_aider
 from aider_aid.model_discovery import is_known_provider_model, normalize_ollama_model
 from aider_aid.ollama_server_store import (
@@ -2188,9 +2194,27 @@ def _print_doctor_result(result: DoctorResult) -> None:
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Rewrite profile model values to use explicit ollama_chat/ prefixes where needed.",
+    ),
+) -> None:
     profile_store = _profile_store()
     server_store = _server_store()
+    if fix:
+        result = fix_profile_model_prefixes(profile_store)
+        typer.echo(
+            "Doctor fix: "
+            f"updated={len(result.updated_profiles)} "
+            f"unchanged={len(result.unchanged_profiles)} "
+            f"skipped={len(result.skipped_profiles)}"
+        )
+        for path in result.updated_profiles:
+            typer.echo(f"  updated: {path}")
+        for path in result.skipped_profiles:
+            typer.echo(f"  skipped: {path}")
     results = run_doctor(profile_store, server_store)
     for result in results:
         _print_doctor_result(result)

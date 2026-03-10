@@ -10,10 +10,10 @@ from typing import Callable, Mapping
 
 import yaml
 
-from aider_aid.model_discovery import normalize_ollama_model, strip_ollama_prefix
+from aider_aid.model_discovery import is_known_provider_model, normalize_ollama_model, strip_ollama_prefix
 from aider_aid.ollama_server_store import OllamaServerStore
 from aider_aid.paths import PROFILE_SUFFIX
-from aider_aid.profile_store import Profile, ProfileStore, get_set_env_entries, parse_set_env
+from aider_aid.profile_store import MODEL_ROLE_KEYS, Profile, ProfileStore, get_set_env_entries, parse_set_env
 from aider_aid.shell import CommandResult, command_exists, run_command
 
 DEFAULT_OLLAMA_API_BASE = "http://127.0.0.1:11434"
@@ -28,6 +28,72 @@ class DoctorResult:
     message: str
     details: str = ""
     remediation: str = ""
+
+
+@dataclass(frozen=True)
+class DoctorFixResult:
+    updated_profiles: list[Path]
+    unchanged_profiles: list[Path]
+    skipped_profiles: list[Path]
+
+
+def _model_needs_prefix_fix(model: str) -> bool:
+    value = model.strip()
+    if not value:
+        return False
+    if value.startswith(("ollama_chat/", "ollama/")):
+        return value.startswith("ollama/")
+    if is_known_provider_model(value):
+        return False
+    return True
+
+
+def fix_profile_model_prefixes(profile_store: ProfileStore) -> DoctorFixResult:
+    updated_profiles: list[Path] = []
+    unchanged_profiles: list[Path] = []
+    skipped_profiles: list[Path] = []
+
+    for path in sorted(profile_store.profiles_dir.glob(f"*{PROFILE_SUFFIX}")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError):
+            skipped_profiles.append(path)
+            continue
+
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            skipped_profiles.append(path)
+            continue
+
+        changed = False
+        for role_key in MODEL_ROLE_KEYS:
+            model = data.get(role_key)
+            if not isinstance(model, str) or not model.strip():
+                continue
+            if not _model_needs_prefix_fix(model):
+                continue
+            normalized = normalize_ollama_model(model)
+            if normalized == model:
+                continue
+            data[role_key] = normalized
+            changed = True
+
+        if not changed:
+            unchanged_profiles.append(path)
+            continue
+
+        path.write_text(
+            yaml.safe_dump(data, sort_keys=False, allow_unicode=False),
+            encoding="utf-8",
+        )
+        updated_profiles.append(path)
+
+    return DoctorFixResult(
+        updated_profiles=updated_profiles,
+        unchanged_profiles=unchanged_profiles,
+        skipped_profiles=skipped_profiles,
+    )
 
 
 def probe_ollama_endpoint(
@@ -73,12 +139,12 @@ def _collect_ollama_profile_data(
     env_default_endpoint = env.get("OLLAMA_API_BASE", DEFAULT_OLLAMA_API_BASE)
     for profile in profiles:
         has_ollama_role_model = False
-        for role_key in ("model", "weak-model", "editor-model"):
+        for role_key in MODEL_ROLE_KEYS:
             model = profile.config.get(role_key)
             if not isinstance(model, str) or not model.strip():
                 continue
 
-            if model.startswith("ollama/"):
+            if _model_needs_prefix_fix(model):
                 warnings.append(
                     DoctorResult(
                         id="profile.model.prefix",
@@ -88,7 +154,7 @@ def _collect_ollama_profile_data(
                             "Use ollama_chat/ for better aider compatibility."
                         ),
                         remediation=(
-                            "Run `aider-aid config edit` and migrate the model to "
+                            "Run `aider-aid doctor --fix` or `aider-aid config edit` and migrate the model to "
                             f'"{normalize_ollama_model(model)}".'
                         ),
                     )
